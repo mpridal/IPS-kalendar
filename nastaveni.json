@@ -1,22 +1,38 @@
 {
   "mesto": "Olomouc",
   "jas": 25,
-  "otocit_o_180": false,
+  "otocit_o_180": true,
+
+  "noc_od": "22:00",
+  "noc_do": "06:30",
+  "noc_jas": 5,
+  "vikend_jako_noc": false,
+
   "pruhlednost_panelu": 0.55,
   "rozmazani_panelu": 8,
   "min_kontrast_textu": 3.5,
+
+  "skryvat_soukrome_schuzky": true,
+  "celodenni_udalosti": true,
+
   "pocasi_kazdych_minut": 15,
   "kalendar_kazdych_minut": 2,
 
   "_vysvetlivky": {
-    "mesto": "Název města pro počasí, např. \"Brno\". Souřadnice se dohledají samy.",
-    "jas": "Jas displeje 0 až 100. Nad 50 displej víc hřeje.",
+    "mesto": "Název města pro počasí, např. \"Brno\". Hledá se nejdřív v Česku. Název se ukazuje vpravo nahoře.",
+    "jas": "Jas displeje přes den, 0 až 100. Nad 50 displej víc hřeje.",
     "otocit_o_180": "true = obraz vzhůru nohama (když je displej otočený), false = normálně.",
+    "noc_od": "Od kdy je noc, např. \"22:00\". Když je noc_od stejné jako noc_do, noční režim je vypnutý.",
+    "noc_do": "Do kdy je noc, např. \"06:30\".",
+    "noc_jas": "Jas v noci 0 až 100. 0 = displej v noci úplně zhasne.",
+    "vikend_jako_noc": "true = o sobotách a nedělích celý den noční jas, false = víkend jako všední den.",
     "pruhlednost_panelu": "0 = tmavý neprůhledný panel, 1 = úplně průhledný. Doporučeno 0.4 až 0.8.",
     "rozmazani_panelu": "Jak moc je tapeta pod panelem rozmazaná: 0 = ostrá, 30 = hodně rozmazaná.",
     "min_kontrast_textu": "Čitelnost textu 1 až 7: čím víc, tím víc se pod textem přitmaví/zesvětlí tapeta.",
+    "skryvat_soukrome_schuzky": "true = u schůzek označených v Outlooku jako Soukromé se ukáže jen \"Soukromá schůzka\".",
+    "celodenni_udalosti": "true = ukazovat i celodenní události (dovolená, home office…).",
     "pocasi_kazdych_minut": "Jak často stahovat počasí (5 až 180 minut).",
     "kalendar_kazdych_minut": "Jak často číst kalendář z Outlooku (1 až 60 minut).",
-    "poznamka": "Desetinná čísla pište s tečkou (0.55). Změny se projeví do minuty, restart není potřeba."
+    "poznamka": "Desetinná čísla pište s tečkou (0.55), časy v uvozovkách (\"22:00\"). Změny se projeví do minuty. Chyba v souboru se ukáže červeně na displeji."
   }
 }

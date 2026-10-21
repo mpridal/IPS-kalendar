@@ -1,8 +1,9 @@
 # Hodiny pro Turing Smart Screen 3.5" (revize A):
-# datum, čas, svátek, 3 nejbližší schůzky z Outlooku, počasí z Open-Meteo a jmeniny ze svatkyapi.cz.
-# Nastavení (město, jas, průhlednost panelu…) je v souboru nastaveni.json vedle tohoto skriptu;
+# datum, čas, svátek, nejbližší schůzky z Outlooku, počasí z Open-Meteo a jmeniny ze svatkyapi.cz.
+# Nastavení (město, jas, noční režim, průhlednost panelu…) je v souboru nastaveni.json vedle tohoto skriptu;
 # změny se projeví do minuty bez restartu.
 # Spuštění s parametrem --nahled jen uloží obrázek nahled.png (bez displeje).
+# Program se ukončí (a displej zhasne), když do souboru stav.txt někdo zapíše "zastavit" (skript Zastavit displej.cmd).
 
 import json
 import os
@@ -39,35 +40,35 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 from library.log import logger
 from library.lcd.lcd_comm_rev_a import LcdCommRevA, Orientation
 
+SOUBOR_LOG = os.path.join(ZAKLAD, "log.log")
 logger.setLevel(logging.INFO)
-# Log knihovny se zapisuje v kódování Windows, které neumí češtinu -> přepnout na UTF-8
-for h in logging.getLogger().handlers:
+# Log knihovny neumí češtinu a nikdy se nepromazává (backupCount=0) -> nahradit vlastním:
+# max. 512 kB, jedna starší kopie log.log.1
+for h in list(logging.getLogger().handlers):
     if isinstance(h, RotatingFileHandler):
-        h.acquire()
-        try:
-            h.stream.close()
-            h.encoding = "utf-8"
-            h.stream = open(h.baseFilename, "a", encoding="utf-8")
-        finally:
-            h.release()
+        logging.getLogger().removeHandler(h)
+        h.close()
+_log_soubor = RotatingFileHandler(SOUBOR_LOG, maxBytes=512 * 1024, backupCount=1, encoding="utf-8")
+_log_soubor.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", "%d.%m.%Y %H:%M:%S"))
+logging.getLogger().addHandler(_log_soubor)
 
 SIRKA, VYSKA = 480, 320
 SOUBOR_NASTAVENI = os.path.join(ZAKLAD, "nastaveni.json")
+SOUBOR_STAV = os.path.join(ZAKLAD, "stav.txt")  # "zastavit" = ukončit program
 SOUBOR_CACHE = os.path.join(ZAKLAD, "hodiny_cache.dat")  # šifrováno (Windows DPAPI)
 STARA_CACHE = os.path.join(ZAKLAD, "hodiny_cache.json")  # dřívější nešifrovaná verze
 OPAKOVAT_PO_CHYBE = 5 * 60  # sekund
 
 # Barvy
-POZADI = (12, 14, 20)
 BILA = (236, 238, 242)
 SEDA = (140, 150, 165)
-LINKA = (45, 52, 66)
 MODRA = (120, 180, 255)
 ZLUTA = (255, 200, 90)
 CERVENA = (255, 110, 110)
 ORANZOVA = (255, 165, 90)
 AZUROVA = (100, 200, 255)
 ZELENA = (110, 220, 140)
+FIALOVA = (200, 160, 255)
 
 PISMO = os.path.join(ZAKLAD, "res", "fonts", "roboto")
 
@@ -99,31 +100,48 @@ def font(nazev, velikost, nasobek=1):
     return _fonty[klic]
 
 
-# název: (výchozí hodnota, minimum, maximum); text a true/false nemají meze
+# ---------------------------------------------------------------- nastavení
+
+# název: (výchozí hodnota, minimum, maximum); text a true/false nemají meze, čas je "HH:MM"
 VYCHOZI_NASTAVENI = {
     "mesto": ("Olomouc", None, None),
     "jas": (25, 0, 100),
     "otocit_o_180": (False, None, None),
+    "noc_od": ("22:00", None, None),
+    "noc_do": ("06:30", None, None),
+    "noc_jas": (5, 0, 100),
+    "vikend_jako_noc": (False, None, None),
     "pruhlednost_panelu": (0.55, 0.0, 1.0),
     "rozmazani_panelu": (8, 0, 30),
     "min_kontrast_textu": (3.5, 1.0, 7.0),
+    "skryvat_soukrome_schuzky": (True, None, None),
+    "celodenni_udalosti": (True, None, None),
     "pocasi_kazdych_minut": (15, 5, 180),
     "kalendar_kazdych_minut": (2, 1, 60),
 }
+CASOVE_KLICE = {"noc_od", "noc_do"}
 
 # Aktuální nastavení; po změně souboru se načte znovu (viz obnov_nastaveni)
 N = {k: v[0] for k, v in VYCHOZI_NASTAVENI.items()}
+CHYBY_NASTAVENI = []  # zobrazí se na displeji
 _cas_nastaveni = None
 
 
 def nacti_nastaveni():
+    """Vrátí (nastavení, seznam chyb). Neplatné hodnoty nahradí výchozími."""
     nove = {k: v[0] for k, v in VYCHOZI_NASTAVENI.items()}
     try:
         with open(SOUBOR_NASTAVENI, encoding="utf-8-sig") as f:
             ze_souboru = json.load(f)
+        if not isinstance(ze_souboru, dict):
+            raise ValueError("soubor nemá tvar { ... }")
+    except json.JSONDecodeError as e:
+        logger.warning(f"Chyba v nastaveni.json: {e}")
+        return nove, [f"Chyba v nastaveni.json (řádek {e.lineno}) – používám výchozí nastavení"]
     except Exception as e:
-        logger.warning(f"Nelze načíst nastaveni.json, používám výchozí: {e}")
-        return nove
+        logger.warning(f"Nelze načíst nastaveni.json: {e}")
+        return nove, ["Nastavení nelze načíst – používám výchozí"]
+    chyby = []
     for klic, (vychozi, minimum, maximum) in VYCHOZI_NASTAVENI.items():
         if klic not in ze_souboru:
             continue
@@ -132,6 +150,8 @@ def nacti_nastaveni():
             if isinstance(vychozi, bool):
                 if not isinstance(hodnota, bool):
                     raise ValueError("má být true nebo false")
+            elif klic in CASOVE_KLICE:
+                hodnota = datetime.strptime(str(hodnota).strip(), "%H:%M").strftime("%H:%M")
             elif isinstance(vychozi, str):
                 hodnota = str(hodnota).strip()
                 if not hodnota:
@@ -141,7 +161,8 @@ def nacti_nastaveni():
             nove[klic] = hodnota
         except Exception as e:
             logger.warning(f"Neplatná hodnota '{klic}' v nastaveni.json ({e}), používám {vychozi}")
-    return nove
+            chyby.append(f"Neplatná hodnota „{klic}“ v nastaveni.json – používám {vychozi}")
+    return nove, chyby
 
 
 def obnov_nastaveni():
@@ -154,13 +175,34 @@ def obnov_nastaveni():
     if cas == _cas_nastaveni:
         return set()
     _cas_nastaveni = cas
-    nove = nacti_nastaveni()
+    nove, chyby = nacti_nastaveni()
+    CHYBY_NASTAVENI[:] = chyby
     zmeny = {k for k in nove if nove[k] != N[k]}
     N.update(nove)
     if zmeny:
         logger.info("Nastavení: " + ", ".join(f"{k}={N[k]}" for k in sorted(zmeny)))
     return zmeny
 
+
+def je_noc(ted):
+    if N["vikend_jako_noc"] and ted.weekday() >= 5:
+        return True
+    od, do = N["noc_od"], N["noc_do"]
+    if od == do:
+        return False
+    cas = ted.strftime("%H:%M")
+    return (od <= cas < do) if od < do else (cas >= od or cas < do)
+
+
+def ma_skoncit():
+    try:
+        with open(SOUBOR_STAV, encoding="utf-8-sig") as f:
+            return f.read().strip().lower() == "zastavit"
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------- data
 
 class Data:
     """Poslední známá data z internetu; ukládají se na disk, aby přežila restart i výpadek sítě."""
@@ -219,16 +261,24 @@ def najdi_souradnice(data, mesto):
     ulozene = data.get("misto")
     if ulozene and ulozene.get("dotaz") == mesto:
         return ulozene
-    r = requests.get("https://geocoding-api.open-meteo.com/v1/search",
-                     params={"name": mesto, "count": 1, "language": "cs"}, timeout=15)
-    r.raise_for_status()
-    vysledky = r.json().get("results") or []
+    vysledky = []
+    # Nejdřív v Česku (aby např. "Kostelec" nebyl v zahraničí), pak kdekoli
+    for zeme in ("CZ", None):
+        parametry = {"name": mesto, "count": 1, "language": "cs"}
+        if zeme:
+            parametry["countryCode"] = zeme
+        r = requests.get("https://geocoding-api.open-meteo.com/v1/search", params=parametry, timeout=15)
+        r.raise_for_status()
+        vysledky = r.json().get("results") or []
+        if vysledky:
+            break
     if not vysledky:
         raise ValueError(f"Město '{mesto}' nenalezeno")
     v = vysledky[0]
-    misto = {"dotaz": mesto, "nazev": v["name"], "lat": v["latitude"], "lon": v["longitude"]}
+    misto = {"dotaz": mesto, "nazev": v["name"], "lat": v["latitude"], "lon": v["longitude"],
+             "casova_zona": v.get("timezone") or "Europe/Prague"}
     data.set("misto", misto)
-    logger.info(f"Souřadnice pro {mesto}: {misto['lat']}, {misto['lon']}")
+    logger.info(f"Souřadnice pro {mesto}: {misto['nazev']}, {v.get('country', '')} {misto['lat']}, {misto['lon']}")
     return misto
 
 
@@ -238,7 +288,7 @@ def stahni_pocasi(data, mesto):
         "latitude": misto["lat"], "longitude": misto["lon"],
         "current": "temperature_2m,apparent_temperature,weather_code,is_day",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
-        "timezone": "Europe/Prague", "forecast_days": 4,
+        "timezone": misto.get("casova_zona", "Europe/Prague"), "forecast_days": 4,
     }, timeout=15)
     r.raise_for_status()
     j = r.json()
@@ -257,13 +307,15 @@ def stahni_svatek(data, den):
 
 
 def nacti_kalendar(data):
-    """Přečte z klasického Outlooku nejbližší schůzky (dnes a zítra). Jen čte, nic nemění."""
+    """Přečte z klasického Outlooku nejbližší schůzky (dnes a zítra). Jen čte, nic nemění.
+    U soukromých schůzek se název vůbec neukládá (pokud je zapnuté skryvat_soukrome_schuzky)."""
     import win32com.client
     polozky = win32com.client.Dispatch("Outlook.Application").GetNamespace("MAPI").GetDefaultFolder(9).Items
     polozky.IncludeRecurrences = True
     polozky.Sort("[Start]")
     ted = datetime.now()
     od, do = ted.date(), ted.date() + timedelta(days=2)
+    hranice = datetime.combine(do, datetime.min.time())
     vyber = polozky.Restrict(f"[Start] < '{do.strftime('%m/%d/%Y')}' AND [End] > '{od.strftime('%m/%d/%Y')}'")
     schuzky = []
     for p in vyber:
@@ -271,16 +323,28 @@ def nacti_kalendar(data):
             # Outlook vrací místní čas označený jako UTC -> vezmeme jen hodnoty
             zacatek = datetime(p.Start.year, p.Start.month, p.Start.day, p.Start.hour, p.Start.minute)
             konec = datetime(p.End.year, p.End.month, p.End.day, p.End.hour, p.End.minute)
-            if p.AllDayEvent or konec <= ted or zacatek >= datetime.combine(do, datetime.min.time()):
+            if zacatek >= hranice:
+                break  # seřazeno podle začátku, další už jsou pozdě
+            celodenni = bool(p.AllDayEvent)
+            if konec <= ted or (celodenni and not N["celodenni_udalosti"]):
                 continue
             if p.MeetingStatus in (5, 7) or p.BusyStatus == 0:  # zrušené nebo "volno"
                 continue
-            schuzky.append({"od": zacatek.isoformat(), "do": konec.isoformat(), "nazev": p.Subject or ""})
+            soukroma = p.Sensitivity == 2 and N["skryvat_soukrome_schuzky"]  # 2 = soukromé
+            schuzky.append({"od": zacatek.isoformat(), "do": konec.isoformat(), "celodenni": celodenni,
+                            "soukroma": soukroma, "nazev": "" if soukroma else (p.Subject or "")})
         except Exception:
             continue
-        if len(schuzky) >= 10:
+        if len(schuzky) >= 15:
             break
-    data.set("kalendar", {"cas": time.time(), "schuzky": schuzky})
+
+    def poradi(s):
+        # Celodenní události nahoře u svého dne (vícedenní, které už začaly, patří k dnešku)
+        zacatek = datetime.fromisoformat(s["od"])
+        den = max(zacatek.date(), ted.date())
+        return den, 0 if s["celodenni"] else 1, zacatek
+
+    data.set("kalendar", {"cas": time.time(), "schuzky": sorted(schuzky, key=poradi)})
 
 
 def stahovani(data, ihned):
@@ -311,16 +375,19 @@ def stahovani(data, ihned):
         ihned.wait(20)
 
 
-def kalendar_na_pozadi(data):
+def kalendar_na_pozadi(data, ihned):
     import pythoncom
     pythoncom.CoInitialize()
     while True:
+        ihned.clear()
         try:
             nacti_kalendar(data)
         except Exception as e:
             logger.warning(f"Kalendář Outlooku se nepodařilo načíst: {e}")
-        time.sleep(N["kalendar_kazdych_minut"] * 60)
+        ihned.wait(N["kalendar_kazdych_minut"] * 60)
 
+
+# ---------------------------------------------------------------- kreslení
 
 S = 2  # kreslí se ve dvojnásobném rozlišení a pak zmenší -> hladké okraje
 
@@ -387,6 +454,7 @@ class Platno:
     def __init__(self):
         self.img = tapeta.ostra.copy()
         self.d = ImageDraw.Draw(self.img)
+        self.svetly_panel = False
 
     def panel(self, x0, y0, x1, y1, r=18, tint=None, alfa=None):
         if alfa is None:
@@ -396,7 +464,7 @@ class Platno:
             # Na světlé tapetě světlé sklo, na tmavé tmavé
             jas = ImageStat.Stat(self.img.crop(box).convert("L")).mean[0]
             tint = (240, 243, 248) if jas > 150 else (12, 16, 28)
-        self.svetly_panel = tint[0] > 128
+            self.svetly_panel = tint[0] > 128
         maska = Image.new("L", self.img.size, 0)
         ImageDraw.Draw(maska).rounded_rectangle(box, r * S, fill=255)
         sklo = Image.blend(tapeta.rozmazana, Image.new("RGB", self.img.size, tint), alfa / 255)
@@ -450,7 +518,7 @@ class Platno:
         return self.d.textlength(t, font=pismo) / S
 
     def text(self, x, y, t, pismo, barva, anchor="mm", max_sirka=None, na_tapete=True, tmava_barva=None):
-        """Vrací šířku textu. Na tapetě se barva volí podle jasu pozadí (světlá, nebo tmava_barva)."""
+        """Vrací šířku textu. Barva se volí podle jasu pozadí (světlá, nebo tmava_barva)."""
         if max_sirka:
             while self.d.textlength(t, font=pismo) > max_sirka * S and pismo.size > 10 * S:
                 pismo = font(os.path.basename(pismo.path)[7:-4], pismo.size // S - 1, S)
@@ -458,12 +526,30 @@ class Platno:
         if na_tapete:
             barva = self.barva_pro_tapetu(self.d.textbbox(pozice, t, font=pismo, anchor=anchor),
                                           barva, tmava_barva or tmava_varianta(barva))
-            self.d.text(pozice, t, font=pismo, fill=barva, anchor=anchor)
-        else:
-            self.d.text(pozice, t, font=pismo, fill=barva, anchor=anchor)
+        self.d.text(pozice, t, font=pismo, fill=barva, anchor=anchor)
         return self.d.textlength(t, font=pismo) / S
 
+    def mesic(self, cx, cy, vel):
+        """Srpek měsíce přes masku (dvě kružnice), takže pod ním zůstane tapeta bez skvrn."""
+        r = .3 * vel * S
+        cx, cy = cx * S, cy * S
+        maska = Image.new("L", self.img.size, 0)
+        m = ImageDraw.Draw(maska)
+        m.ellipse((cx - r, cy - r, cx + r, cy + r), fill=255)
+        m.ellipse((cx - r * .35, cy - r * 1.25, cx + r * 1.65, cy + r * .75), fill=0)
+        maska = maska.filter(ImageFilter.GaussianBlur(S * .6))
+        self.img.paste(Image.new("RGB", self.img.size, (240, 236, 205)), (0, 0), maska)
+        self.d = ImageDraw.Draw(self.img)
+
     def ikona(self, cx, cy, vel, kod, den=True):
+        if not den and kod in (0, 1, 2):
+            if kod == 0:
+                self.mesic(cx, cy, vel)
+            else:
+                self.mesic(cx + .16 * vel, cy - .16 * vel, vel * .75)
+                self.ikona(cx, cy, vel, 3)
+                return
+            return
         d, s = self.d, vel * S
         cx, cy = cx * S, cy * S
         tloustka = max(2, int(.07 * s))
@@ -483,10 +569,6 @@ class Platno:
 
         def slunce(dx=0, dy=0, r=.22):
             x, y = cx + dx * s, cy + dy * s
-            if not den:
-                d.ellipse((x - r * s, y - r * s, x + r * s, y + r * s), fill=(235, 235, 210))
-                d.ellipse((x - r * .35 * s, y - r * 1.15 * s, x + r * 1.45 * s, y + r * .65 * s), fill=self.img.getpixel((int(x + r * 1.3 * s), int(y - r * 1.3 * s))))
-                return
             for i in range(8):
                 a = i * math.pi / 4
                 d.line((x + math.cos(a) * r * 1.35 * s, y + math.sin(a) * r * 1.35 * s,
@@ -532,19 +614,26 @@ def f(nazev, velikost):
     return font(nazev, velikost, S)
 
 
+def kdy_hodiny(cas_unix, ted):
+    kdy = datetime.fromtimestamp(cas_unix)
+    return f"{kdy:%H:%M}" if kdy.date() == ted.date() else f"{kdy:%d.%m. %H:%M}"
+
+
 def vykresli_schuzky(c, data, ted, y_radky):
     kalendar = data.get("kalendar")
-    p_cas, p_text = f("Medium", 16), f("Regular", 16)
+    p_cas, p_text = f("Medium", 17), f("Regular", 17)
     if kalendar is None:
-        c.text(SIRKA // 2, y_radky[1], "Kalendář: načítám…", f("Regular", 16), SEDA)
+        c.text(SIRKA // 2, y_radky[1], "Kalendář: načítám…", f("Regular", 17), SEDA)
         return
     schuzky = [s for s in kalendar["schuzky"] if datetime.fromisoformat(s["do"]) > ted][:len(y_radky)]
     if not schuzky:
-        c.text(SIRKA // 2, y_radky[1], "Dnes ani zítra žádné další schůzky", f("Regular", 16), SEDA)
+        c.text(SIRKA // 2, y_radky[1], "Dnes ani zítra žádné další schůzky", f("Regular", 17), SEDA)
         return
     for y, s in zip(y_radky, schuzky):
         zacatek, konec = datetime.fromisoformat(s["od"]), datetime.fromisoformat(s["do"])
-        if zacatek <= ted:
+        if s.get("celodenni"):
+            kdy, barva = ("celý den", FIALOVA) if zacatek.date() <= ted.date() else ("zítra celý den", (190, 200, 215))
+        elif zacatek <= ted:
             kdy, barva = f"teď do {konec:%H:%M}", ZELENA
         elif zacatek.date() == ted.date():
             minut = int((zacatek - ted).total_seconds() // 60) + 1
@@ -553,47 +642,83 @@ def vykresli_schuzky(c, data, ted, y_radky):
         else:
             kdy, barva = f"zítra {zacatek:%H:%M}", (190, 200, 215)
         x = 22 + c.text(22, y, kdy, p_cas, barva, "lm") + 10
-        c.text(x, y, zkrat(c, s["nazev"], p_text, 458 - x), p_text, BILA, "lm")
+        if s.get("soukroma"):
+            c.text(x, y, "Soukromá schůzka", p_text, (175, 185, 200), "lm", tmava_barva=(70, 78, 92))
+        else:
+            c.text(x, y, zkrat(c, s["nazev"], p_text, 458 - x), p_text, BILA, "lm")
 
 
 def vykresli(data, ted):
     tapeta.obnov()
     c = Platno()
 
+    # Červený pruh s chybou v nastavení
+    posun = 0
+    if CHYBY_NASTAVENI:
+        zprava = CHYBY_NASTAVENI[0] + (f" (+{len(CHYBY_NASTAVENI) - 1} další)" if len(CHYBY_NASTAVENI) > 1 else "")
+        c.panel(8, 4, 472, 30, r=10, tint=(120, 20, 20), alfa=200)
+        c.text(240, 17, zprava, f("Medium", 14), (255, 235, 235), max_sirka=450, na_tapete=False)
+        posun = 18
+
     # Nahoře přímo na tapetě: datum, čas, svátek
-    datum = f"{DNY[ted.weekday()]} {ted.day}. {MESICE[ted.month - 1]} {ted.year}"
-    c.text(20, 20, datum, f("Medium", 20), BILA, "lm", max_sirka=300, na_tapete=True)
-    c.text(16, 70, ted.strftime("%H:%M"), f("Bold", 80), BILA, "lm", na_tapete=True)
+    datum = f"{DNY[ted.weekday()]} {ted.day}. {MESICE[ted.month - 1]}"
+    c.text(20, 20 + posun, datum, f("Medium", 21), BILA, "lm", max_sirka=280)
+    c.text(16, 70 + posun, ted.strftime("%H:%M"), f("Bold", 80 - (6 if posun else 0)), BILA, "lm")
+    y_svatek = 118 + posun // 2
     svatek = data.get("svatek")
     if svatek and svatek.get("datum") == ted.date().isoformat():
         x = 20
         if svatek.get("jmeno"):
             sloveso = "mají" if " a " in svatek["jmeno"] else "má"
-            x += c.text(x, 118, f"Svátek {sloveso} {svatek['jmeno']}", f("Medium", 17), ZLUTA, "lm",
-                        na_tapete=True, tmava_barva=(120, 70, 0))
+            x += c.text(x, y_svatek, f"Svátek {sloveso} {svatek['jmeno']}", f("Medium", 18), ZLUTA, "lm",
+                        tmava_barva=(120, 70, 0))
         if svatek.get("statni"):
             if x > 20:
-                x += c.text(x, 118, "  ·  ", f("Medium", 17), BILA, "lm", na_tapete=True)
-            c.text(x, 118, svatek["statni"], f("Medium", 17), CERVENA, "lm", na_tapete=True, tmava_barva=(150, 20, 20))
+                x += c.text(x, y_svatek, "  ·  ", f("Medium", 18), BILA, "lm")
+            c.text(x, y_svatek, svatek["statni"], f("Medium", 18), CERVENA, "lm", tmava_barva=(150, 20, 20))
 
-    # Vpravo nahoře: počasí teď
+    # Vpravo nahoře: město, počasí teď, dnešní max/min
     pocasi = data.get("pocasi")
     if pocasi:
+        dy = posun // 2
+        if not posun:
+            c.text(464, 16, pocasi.get("mesto", ""), f("Medium", 13), (215, 222, 235), "rm", max_sirka=150)
         cu = pocasi["current"]
-        c.ikona(330, 58, 50, cu["weather_code"], cu.get("is_day", 1) == 1)
-        c.text(412, 56, f"{round(cu['temperature_2m'])}°", f("Bold", 38), BILA, na_tapete=True)
-        c.text(372, 104, POPIS_POCASI.get(cu["weather_code"], ""), f("Medium", 16), BILA, na_tapete=True, max_sirka=200)
+        c.ikona(322, 56 + dy, 46, cu["weather_code"], cu.get("is_day", 1) == 1)
+        c.text(408, 54 + dy, f"{round(cu['temperature_2m'])}°", f("Bold", 38), BILA)
+        popis = POPIS_POCASI.get(cu["weather_code"], "")
         stari = time.time() - pocasi["cas"]
-        if stari > 60 * 60:
-            kdy = datetime.fromtimestamp(pocasi["cas"]).strftime("%H:%M" if stari < 20 * 3600 else "%d.%m. %H:%M")
-            c.text(SIRKA - 12, 14, f"offline · data z {kdy}", f("Regular", 12), CERVENA, "rm", na_tapete=True)
+        if stari > 60 * 60:  # staré počasí (výpadek internetu)
+            pozn = f" · před {int(stari // 3600)} h" if stari < 48 * 3600 else f" · z {kdy_hodiny(pocasi['cas'], ted)}"
+            w = c.delka(popis, f("Medium", 16)) + c.delka(pozn, f("Medium", 15))
+            x = 380 - w / 2
+            x += c.text(x, 93 + dy, popis, f("Medium", 16), BILA, "lm")
+            c.text(x, 93 + dy, pozn, f("Medium", 15), CERVENA, "lm", tmava_barva=(150, 20, 20))
+        else:
+            c.text(380, 93 + dy, popis, f("Medium", 16), BILA, max_sirka=190)
+        d = pocasi["daily"]
+        if ted.date().isoformat() in d["time"]:
+            i = d["time"].index(ted.date().isoformat())
+            casti = [("dnes ", f("Regular", 16), BILA, None),
+                     (f"{round(d['temperature_2m_max'][i])}°", f("Bold", 17), ORANZOVA, (150, 70, 10)),
+                     (f" / {round(d['temperature_2m_min'][i])}°", f("Regular", 16), MODRA, (30, 70, 140))]
+            x = 380 - sum(c.delka(t, p) for t, p, _, _ in casti) / 2
+            for t, p, b, tb in casti:
+                x += c.text(x, 116 + dy, t, p, b, "lm", tmava_barva=tb)
 
-    # Dole skleněný panel: 3 schůzky + předpověď na 3 dny
-    c.panel(8, 136, 472, 312)
-    vykresli_schuzky(c, data, ted, (154, 177, 200))
-    c.d.line((22 * S, 216 * S, 458 * S, 216 * S), fill=(150, 155, 165) if c.svetly_panel else (255, 255, 255), width=1)
+    # Dole skleněný panel: schůzky + předpověď na 3 dny
+    c.panel(8, 136, 472, 314)
+    vykresli_schuzky(c, data, ted, (156, 180, 204))
+    barva_linky = (150, 155, 165) if c.svetly_panel else (255, 255, 255)
+    konec_linky = 458
+    kalendar = data.get("kalendar")
+    if kalendar and time.time() - kalendar["cas"] > max(15, 3 * N["kalendar_kazdych_minut"]) * 60:
+        pozn = f"kalendář naposledy v {kdy_hodiny(kalendar['cas'], ted)}"
+        konec_linky = 458 - c.delka(pozn, f("Medium", 12)) - 8
+        c.text(458, 219, pozn, f("Medium", 12), CERVENA, "rm", tmava_barva=(150, 20, 20))
+    c.d.line((22 * S, 219 * S, konec_linky * S, 219 * S), fill=barva_linky, width=1)
     if not pocasi:
-        c.text(SIRKA // 2, 262, "Počasí: čekám na internet…", f("Regular", 18), SEDA)
+        c.text(SIRKA // 2, 265, "Počasí: čekám na internet…", f("Regular", 18), SEDA)
         return c.hotovo()
     d = pocasi["daily"]
     dnes = ted.date().isoformat()
@@ -602,18 +727,38 @@ def vykresli(data, ted):
     for j, i in enumerate(dny):
         cx = 22 + 436 / 6 * (2 * j + 1)
         den = date.fromisoformat(d["time"][i])
-        c.ikona(cx - 44, 262, 32, d["weather_code"][i])
-        c.text(cx - 20, 240, f"{DNY_KRATCE[den.weekday()]} {den.day}. {den.month}.", f("Medium", 15), (200, 210, 225), "lm")
-        x = cx - 20 + c.text(cx - 20, 264, f"{round(d['temperature_2m_max'][i])}°", f("Bold", 20), ORANZOVA, "lm")
-        c.text(x + 5, 265, f"{round(d['temperature_2m_min'][i])}°", f("Regular", 17), MODRA, "lm")
+        c.ikona(cx - 46, 264, 34, d["weather_code"][i])
+        c.text(cx - 20, 240, f"{DNY_KRATCE[den.weekday()]} {den.day}. {den.month}.", f("Medium", 16), (205, 215, 230), "lm")
+        x = cx - 20 + c.text(cx - 20, 265, f"{round(d['temperature_2m_max'][i])}°", f("Bold", 22), ORANZOVA, "lm")
+        c.text(x + 5, 266, f"{round(d['temperature_2m_min'][i])}°", f("Regular", 19), MODRA, "lm")
         srazky = d["precipitation_probability_max"][i]
-        c.text(cx - 20, 288, f"srážky {srazky if srazky is not None else '?'} %", f("Regular", 13), AZUROVA, "lm")
+        c.text(cx - 20, 292, f"srážky {srazky if srazky is not None else '?'} %", f("Regular", 15), AZUROVA, "lm")
     return c.hotovo()
 
+
+def nouzova_obrazovka(ted):
+    """Jednoduchá obrazovka, když se běžný obraz nepodaří nakreslit (nepotřebuje tapetu ani data)."""
+    try:
+        img = Image.new("RGB", (SIRKA * S, VYSKA * S), (14, 16, 24))
+        d = ImageDraw.Draw(img)
+        d.text((240 * S, 34 * S), f"{DNY[ted.weekday()]} {ted.day}. {MESICE[ted.month - 1]}", font=f("Medium", 22), fill=(200, 210, 230), anchor="mm")
+        d.text((240 * S, 130 * S), ted.strftime("%H:%M"), font=f("Bold", 120), fill=(240, 240, 245), anchor="mm")
+        d.text((240 * S, 238 * S), "Zobrazení se nepodařilo vykreslit.", font=f("Medium", 18), fill=(255, 190, 120), anchor="mm")
+        d.text((240 * S, 266 * S), "Zkouším to znovu, podrobnosti jsou v log.log", font=f("Regular", 15), fill=(160, 170, 185), anchor="mm")
+        return img.resize((SIRKA, VYSKA), Image.LANCZOS)
+    except Exception:
+        return Image.new("RGB", (SIRKA, VYSKA), (14, 16, 24))
+
+
+# ---------------------------------------------------------------- displej
 
 class Displej(LcdCommRevA):
     """Při chybě spojení (odpojení kabelu) nehlásí chybu jen do logu jako knihovna, ale vyhodí výjimku,
     aby se displej znovu celý inicializoval. Jinak by dostal zbytek obrázku v základním stavu a obraz by se rozhodil."""
+
+    def __init__(self, *args, **kwargs):
+        self.zhasnuto = False
+        super().__init__(*args, **kwargs)
 
     def WriteLine(self, line: bytes):
         try:
@@ -632,24 +777,43 @@ class Displej(LcdCommRevA):
         return self.auto_detect_com_port() is not None
 
 
+class Konec(Exception):
+    """Požadavek na ukončení programu (stav.txt = zastavit)."""
+
+
 def pockej_na_displej():
     while Displej.auto_detect_com_port() is None:
+        if ma_skoncit():
+            raise Konec()
         time.sleep(2)
 
 
-def pripoj_displej():
+def pripoj_displej(ted):
     pockej_na_displej()
     lcd = Displej(com_port="AUTO", display_width=320, display_height=480)
     lcd.Reset()
     lcd.InitializeComm()
-    nastav_displej(lcd)
+    nastav_displej(lcd, ted)
     return lcd
 
 
-def nastav_displej(lcd):
-    """Krátká reinicializace před každým překreslením (zlomek sekundy, nebliká)."""
-    lcd.SetBrightness(level=N["jas"])
+def nastav_displej(lcd, ted):
+    """Krátká reinicializace před každým překreslením (zlomek sekundy, nebliká). V noci ztlumí nebo zhasne."""
+    noc = je_noc(ted)
+    jas = N["noc_jas"] if noc else N["jas"]
+    if jas == 0:
+        if not lcd.zhasnuto:
+            lcd.ScreenOff()
+            lcd.zhasnuto = True
+            logger.info("Noční režim: displej zhasnut")
+        return
+    if lcd.zhasnuto:
+        lcd.ScreenOn()
+        lcd.zhasnuto = False
+        logger.info("Displej znovu rozsvícen")
+    lcd.SetBrightness(level=jas)
     lcd.SetOrientation(orientation=Orientation.REVERSE_LANDSCAPE if N["otocit_o_180"] else Orientation.LANDSCAPE)
+
 
 def main():
     obnov_nastaveni()
@@ -665,32 +829,60 @@ def main():
         vykresli(data, datetime.now()).save(os.path.join(ZAKLAD, "nahled.png"))
         return
 
-    stahnout_ihned = threading.Event()
-    threading.Thread(target=stahovani, args=(data, stahnout_ihned), daemon=True).start()
-    threading.Thread(target=kalendar_na_pozadi, args=(data,), daemon=True).start()
+    if ma_skoncit():
+        logger.info("stav.txt říká 'zastavit' – program nespouštím (spusť přes Spustit displej.cmd)")
+        return
+
+    pocasi_ihned = threading.Event()
+    kalendar_ihned = threading.Event()
+    threading.Thread(target=stahovani, args=(data, pocasi_ihned), daemon=True).start()
+    threading.Thread(target=kalendar_na_pozadi, args=(data, kalendar_ihned), daemon=True).start()
+    posledni_chyba_kresleni = None
 
     while True:
         lcd = None
         try:
-            lcd = pripoj_displej()
+            lcd = pripoj_displej(datetime.now())
             logger.info("Displej připojen")
             while True:
                 zmeny = obnov_nastaveni()
                 if "rozmazani_panelu" in zmeny:
                     tapeta.klic = None  # znovu připravit rozmazanou tapetu
                 if zmeny & {"mesto", "pocasi_kazdych_minut"}:
-                    stahnout_ihned.set()
+                    pocasi_ihned.set()
+                if zmeny & {"skryvat_soukrome_schuzky", "celodenni_udalosti", "kalendar_kazdych_minut"}:
+                    kalendar_ihned.set()
                 ted = datetime.now()
                 data.zmena.clear()
-                obraz = vykresli(data, ted)
-                nastav_displej(lcd)
-                lcd.DisplayPILImage(obraz)
+                # Chyba při kreslení nesmí vést k restartování displeje -> náhradní obrazovka
+                try:
+                    obraz = vykresli(data, ted)
+                    posledni_chyba_kresleni = None
+                except Exception as e:
+                    if str(e) != posledni_chyba_kresleni:
+                        logger.exception("Chyba při kreslení obrazu, zobrazuji náhradní obrazovku")
+                        posledni_chyba_kresleni = str(e)
+                    obraz = nouzova_obrazovka(ted)
+                nastav_displej(lcd, ted)
+                if not lcd.zhasnuto:
+                    lcd.DisplayPILImage(obraz)
                 # Čekej na začátek další minuty, nebo na nová data
                 dalsi = ted.replace(second=0, microsecond=0) + timedelta(minutes=1)
                 while datetime.now() < dalsi and not data.zmena.is_set():
                     data.zmena.wait(min(2.0, max(0.05, (dalsi - datetime.now()).total_seconds())))
+                    if ma_skoncit():
+                        raise Konec()
                     if not lcd.je_pripojen():
                         raise ConnectionError("Displej byl odpojen")
+        except Konec:
+            logger.info("Požadavek na zastavení: zhasínám displej a končím")
+            try:
+                if lcd:
+                    lcd.ScreenOff()
+                    lcd.closeSerial()
+            except Exception:
+                pass
+            return
         except Exception as e:
             logger.error(f"Chyba displeje, připojím ho znovu: {e}")
             try:
