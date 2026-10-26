@@ -4,9 +4,13 @@
 # změny se projeví do minuty bez restartu.
 # Spuštění s parametrem --nahled jen uloží obrázek nahled.png (bez displeje).
 # Program se ukončí (a displej zhasne), když do souboru stav.txt někdo zapíše "zastavit" (skript Zastavit displej.cmd).
+# Při vypínání/uspávání počítače čistě ukončí spojení s displejem (obraz ponechá, nebo displej zhasne – viz pri_vypnuti_pc).
+# Log, mezipaměť a záznam o zamrznutí jsou mimo OneDrive v %LOCALAPPDATA%\IPS-kalendar.
 
+import faulthandler
 import json
 import os
+import shutil
 import sys
 import threading
 import math
@@ -15,8 +19,37 @@ import winreg
 from datetime import date, datetime, timedelta
 
 ZAKLAD = os.path.dirname(os.path.abspath(__file__))
-os.chdir(ZAKLAD)  # knihovna zapisuje log.log do aktuální složky
+# Často zapisované soubory mimo OneDrive (synchronizace je zbytečná a zápis do ní může zdržovat)
+DATA_SLOZKA = os.path.join(os.environ.get("LOCALAPPDATA", ZAKLAD), "IPS-kalendar")
+os.makedirs(DATA_SLOZKA, exist_ok=True)
+os.chdir(DATA_SLOZKA)  # knihovna zapisuje log.log do aktuální složky
 sys.path.insert(0, ZAKLAD)
+
+# Hlídač zamrznutí: když se program 5 minut nepohne, zapíše stav všech vláken a ukončí se
+# (Plánovač úloh ho do 5 minut spustí znovu). Hlavní smyčka hlídače průběžně odkládá.
+SOUBOR_ZAMRZNUTI = os.path.join(DATA_SLOZKA, "zamrznuti.txt")
+HLIDAC_SEKUND = 300
+_zamrznuti = open(SOUBOR_ZAMRZNUTI, "a", encoding="utf-8")
+
+
+def hlidac():
+    faulthandler.dump_traceback_later(HLIDAC_SEKUND, exit=True, file=_zamrznuti)
+
+
+def hlidac_vypnout():
+    faulthandler.cancel_dump_traceback_later()
+
+
+hlidac()
+
+# Jednorázový přesun starého logu a mezipaměti z OneDrivu (přesun, ne mazání)
+for _nazev in ("log.log", "log.log.1", "hodiny_cache.dat"):
+    _stary, _novy = os.path.join(ZAKLAD, _nazev), os.path.join(DATA_SLOZKA, _nazev)
+    if os.path.isfile(_stary) and not os.path.exists(_novy):
+        try:
+            shutil.move(_stary, _novy)
+        except OSError:
+            pass
 
 # pythonw.exe (spuštění bez okna) nemá konzoli
 if sys.stdout is None:
@@ -40,7 +73,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat
 from library.log import logger
 from library.lcd.lcd_comm_rev_a import LcdCommRevA, Orientation
 
-SOUBOR_LOG = os.path.join(ZAKLAD, "log.log")
+SOUBOR_LOG = os.path.join(DATA_SLOZKA, "log.log")
 logger.setLevel(logging.INFO)
 # Log knihovny neumí češtinu a nikdy se nepromazává (backupCount=0) -> nahradit vlastním:
 # max. 512 kB, jedna starší kopie log.log.1
@@ -55,7 +88,7 @@ logging.getLogger().addHandler(_log_soubor)
 SIRKA, VYSKA = 480, 320
 SOUBOR_NASTAVENI = os.path.join(ZAKLAD, "nastaveni.json")
 SOUBOR_STAV = os.path.join(ZAKLAD, "stav.txt")  # "zastavit" = ukončit program
-SOUBOR_CACHE = os.path.join(ZAKLAD, "hodiny_cache.dat")  # šifrováno (Windows DPAPI)
+SOUBOR_CACHE = os.path.join(DATA_SLOZKA, "hodiny_cache.dat")  # šifrováno (Windows DPAPI)
 STARA_CACHE = os.path.join(ZAKLAD, "hodiny_cache.json")  # dřívější nešifrovaná verze
 OPAKOVAT_PO_CHYBE = 5 * 60  # sekund
 
@@ -118,8 +151,10 @@ VYCHOZI_NASTAVENI = {
     "celodenni_udalosti": (True, None, None),
     "pocasi_kazdych_minut": (15, 5, 180),
     "kalendar_kazdych_minut": (2, 1, 60),
+    "pri_vypnuti_pc": ("ponechat", None, None),
 }
 CASOVE_KLICE = {"noc_od", "noc_do"}
+VOLBY = {"pri_vypnuti_pc": ("ponechat", "zhasnout")}
 
 # Aktuální nastavení; po změně souboru se načte znovu (viz obnov_nastaveni)
 N = {k: v[0] for k, v in VYCHOZI_NASTAVENI.items()}
@@ -150,6 +185,10 @@ def nacti_nastaveni():
             if isinstance(vychozi, bool):
                 if not isinstance(hodnota, bool):
                     raise ValueError("má být true nebo false")
+            elif klic in VOLBY:
+                hodnota = str(hodnota).strip().lower()
+                if hodnota not in VOLBY[klic]:
+                    raise ValueError("povolené hodnoty: " + ", ".join(VOLBY[klic]))
             elif klic in CASOVE_KLICE:
                 hodnota = datetime.strptime(str(hodnota).strip(), "%H:%M").strftime("%H:%M")
             elif isinstance(vychozi, str):
@@ -777,12 +816,88 @@ class Displej(LcdCommRevA):
         return self.auto_detect_com_port() is not None
 
 
+ZAMEK_DISPLEJ = threading.Lock()  # aby se obraz neposílal zároveň s ukončením spojení
+_aktualni_lcd = None
+_system_konci_od = None  # čas, kdy se počítač začal vypínat/uspávat (None = běží normálně)
+SYSTEM_KONCI_MAX = 120  # sekund; déle to trvat nemůže -> počítač se mezitím probudil
+
+
+def system_konci():
+    global _system_konci_od
+    if _system_konci_od and time.time() - _system_konci_od > SYSTEM_KONCI_MAX:
+        _system_konci_od = None  # pojistka, kdyby nepřišla zpráva o probuzení
+    return _system_konci_od is not None
+
+
+def pri_vypnuti(duvod):
+    """Počítač se vypíná nebo uspává: dokončí rozpracovaný obraz a čistě ukončí spojení s displejem."""
+    global _system_konci_od
+    _system_konci_od = time.time()
+    hlidac_vypnout()
+    if not ZAMEK_DISPLEJ.acquire(timeout=4):
+        return
+    try:
+        lcd = _aktualni_lcd
+        if lcd:
+            if N["pri_vypnuti_pc"] == "zhasnout":
+                lcd.ScreenOff()
+            lcd.closeSerial()
+        logger.info(f"Počítač se {duvod}: spojení s displejem ukončeno ({N['pri_vypnuti_pc']})")
+    except Exception as e:
+        logger.warning(f"Ukončení spojení při {duvod}: {e}")
+    finally:
+        ZAMEK_DISPLEJ.release()
+
+
+def hlidej_vypinani():
+    """Skryté okno, kterému Windows posílá zprávy o vypínání, odhlášení a uspání."""
+    import win32api
+    import win32con
+    import win32gui
+    WM_POWERBROADCAST, PBT_APMSUSPEND, PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC = 0x218, 0x4, 0x7, 0x12
+
+    def zpravy(hwnd, msg, wparam, lparam):
+        global _system_konci_od
+        if msg == win32con.WM_QUERYENDSESSION:
+            return True
+        if msg == win32con.WM_ENDSESSION:
+            if wparam:
+                pri_vypnuti("vypíná")
+            return 0
+        if msg == WM_POWERBROADCAST:
+            if wparam == PBT_APMSUSPEND:
+                pri_vypnuti("uspává")
+            elif wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC) and _system_konci_od:
+                _system_konci_od = None
+                logger.info("Počítač se probudil")
+            return True
+        return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+    try:
+        wc = win32gui.WNDCLASS()
+        wc.lpfnWndProc = zpravy
+        wc.lpszClassName = "IpsKalendarHodiny"
+        wc.hInstance = win32api.GetModuleHandle(None)
+        win32gui.RegisterClass(wc)
+        # Běžné (neviditelné) okno, ne "message-only" – to by zprávy o vypínání nedostávalo
+        win32gui.CreateWindow(wc.lpszClassName, "IPS kalendář", 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
+        win32gui.PumpMessages()
+    except Exception as e:
+        logger.warning(f"Hlídání vypínání počítače nefunguje: {e}")
+
+
+class Probuzeni(Exception):
+    """Počítač se probudil -> displej připojit znovu (není to chyba)."""
+
+
 class Konec(Exception):
     """Požadavek na ukončení programu (stav.txt = zastavit)."""
 
 
 def pockej_na_displej():
-    while Displej.auto_detect_com_port() is None:
+    while system_konci() or Displej.auto_detect_com_port() is None:
+        if not system_konci():
+            hlidac()
         if ma_skoncit():
             raise Konec()
         time.sleep(2)
@@ -837,14 +952,25 @@ def main():
     kalendar_ihned = threading.Event()
     threading.Thread(target=stahovani, args=(data, pocasi_ihned), daemon=True).start()
     threading.Thread(target=kalendar_na_pozadi, args=(data, kalendar_ihned), daemon=True).start()
+    threading.Thread(target=hlidej_vypinani, daemon=True).start()
     posledni_chyba_kresleni = None
+    global _aktualni_lcd
 
     while True:
         lcd = None
         try:
-            lcd = pripoj_displej(datetime.now())
+            with ZAMEK_DISPLEJ:
+                lcd = pripoj_displej(datetime.now())
+                _aktualni_lcd = lcd
             logger.info("Displej připojen")
             while True:
+                if system_konci():
+                    # Počítač se vypíná/uspává: na displej nic neposílat, po probuzení připojit znovu
+                    while system_konci():
+                        hlidac_vypnout()
+                        time.sleep(1)
+                    hlidac()
+                    raise Probuzeni()
                 zmeny = obnov_nastaveni()
                 if "rozmazani_panelu" in zmeny:
                     tapeta.klic = None  # znovu připravit rozmazanou tapetu
@@ -863,15 +989,22 @@ def main():
                         logger.exception("Chyba při kreslení obrazu, zobrazuji náhradní obrazovku")
                         posledni_chyba_kresleni = str(e)
                     obraz = nouzova_obrazovka(ted)
-                nastav_displej(lcd, ted)
-                if not lcd.zhasnuto:
-                    lcd.DisplayPILImage(obraz)
+                with ZAMEK_DISPLEJ:
+                    if system_konci():
+                        continue
+                    nastav_displej(lcd, ted)
+                    if not lcd.zhasnuto:
+                        lcd.DisplayPILImage(obraz)
                 # Čekej na začátek další minuty, nebo na nová data
                 dalsi = ted.replace(second=0, microsecond=0) + timedelta(minutes=1)
                 while datetime.now() < dalsi and not data.zmena.is_set():
                     data.zmena.wait(min(2.0, max(0.05, (dalsi - datetime.now()).total_seconds())))
+                    if not system_konci():
+                        hlidac()
                     if ma_skoncit():
                         raise Konec()
+                    if system_konci():
+                        break
                     if not lcd.je_pripojen():
                         raise ConnectionError("Displej byl odpojen")
         except Konec:
@@ -883,8 +1016,15 @@ def main():
             except Exception:
                 pass
             return
+        except Probuzeni:
+            _aktualni_lcd = None
+            logger.info("Po probuzení počítače připojuji displej znovu")
         except Exception as e:
-            logger.error(f"Chyba displeje, připojím ho znovu: {e}")
+            _aktualni_lcd = None
+            if system_konci():
+                pass  # chyba při vypínání/uspávání je očekávaná
+            else:
+                logger.error(f"Chyba displeje, připojím ho znovu: {e}")
             try:
                 if lcd:
                     lcd.closeSerial()

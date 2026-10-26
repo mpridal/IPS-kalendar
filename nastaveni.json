@@ -18,7 +18,10 @@
   "pocasi_kazdych_minut": 15,
   "kalendar_kazdych_minut": 2,
 
+  "pri_vypnuti_pc": "ponechat",
+
   "_vysvetlivky": {
+    "pri_vypnuti_pc": "Co udělat s displejem při vypnutí nebo uspání počítače: \"ponechat\" = nechat poslední obraz, \"zhasnout\" = displej zhasne (černý).",
     "mesto": "Název města pro počasí, např. \"Brno\". Hledá se nejdřív v Česku. Název se ukazuje vpravo nahoře.",
     "jas": "Jas displeje přes den, 0 až 100. Nad 50 displej víc hřeje.",
     "otocit_o_180": "true = obraz vzhůru nohama (když je displej otočený), false = normálně.",

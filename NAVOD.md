@@ -32,6 +32,7 @@ Když v souboru uděláš chybu (např. chybí čárka), ukáže se to **červen
 | `celodenni_udalosti` | ukazovat celodenní události (dovolená, home office…) | `true` / `false` |
 | `pocasi_kazdych_minut` | jak často stahovat počasí | 5 až 180 |
 | `kalendar_kazdych_minut` | jak často číst kalendář z Outlooku | 1 až 60 |
+| `pri_vypnuti_pc` | co udělat s displejem při vypnutí nebo uspání počítače | `"ponechat"` (nechat poslední obraz) / `"zhasnout"` |
 
 Desetinná čísla piš s tečkou (`0.55`), časy v uvozovkách (`"22:00"`).
 
@@ -42,7 +43,9 @@ Desetinná čísla piš s tečkou (`0.55`), časy v uvozovkách (`"22:00"`).
 - **tmavá obrazovka „Zobrazení se nepodařilo vykreslit“** – chyba v programu; hodiny jdou dál, podrobnosti jsou v logu
 
 ## Když něco nejde
-Záznam o běhu je v `log.log` (drží se do 512 kB, starší část je v `log.log.1`).
+Záznam o běhu je mimo OneDrive v `%LOCALAPPDATA%\IPS-kalendar\log.log` (drží se do 512 kB, starší část je v `log.log.1`). Do Průzkumníka stačí vložit cestu `%LOCALAPPDATA%\IPS-kalendar`.
+Když program zamrzne, sám se do 5 minut ukončí a Plánovač ho spustí znovu; podrobnosti zapíše do `zamrznuti.txt` ve stejné složce.
+Při vypnutí nebo uspání počítače program čistě ukončí spojení s displejem. Pokud displej i tak zbělá, přepni `pri_vypnuti_pc` na `"zhasnout"` – displej pak bude černý.
 Kalendář se čte z klasického Outlooku, tapeta z aktuálního pozadí Windows.
 Složka projektu je na OneDrivu nastavená jako „Vždy ponechat v tomto zařízení“, aby program šel spustit i bez internetu – toto nastavení neměň.
 Verze programu se ukládají v gitu (větev `ips-kalendar`), staré ruční zálohy jsou ve složce `_archiv`.
