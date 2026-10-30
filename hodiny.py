@@ -355,7 +355,10 @@ def nacti_kalendar(data):
     ted = datetime.now()
     od, do = ted.date(), ted.date() + timedelta(days=2)
     hranice = datetime.combine(do, datetime.min.time())
-    vyber = polozky.Restrict(f"[Start] < '{do.strftime('%m/%d/%Y')}' AND [End] > '{od.strftime('%m/%d/%Y')}'")
+    # Outlook čte datum v dotazu podle formátu nastaveného ve Windows (u nás 01.11.2026);
+    # %x dává právě tento formát (knihovna při startu nastavuje locale podle Windows).
+    # Americké 11/01/2026 by Outlook přečetl jako 11. ledna a nenašel by nic.
+    vyber = polozky.Restrict(f"[Start] < '{do.strftime('%x')}' AND [End] > '{od.strftime('%x')}'")
     schuzky = []
     for p in vyber:
         try:
@@ -367,7 +370,8 @@ def nacti_kalendar(data):
             celodenni = bool(p.AllDayEvent)
             if konec <= ted or (celodenni and not N["celodenni_udalosti"]):
                 continue
-            if p.MeetingStatus in (5, 7) or p.BusyStatus == 0:  # zrušené nebo "volno"
+            # zrušené schůzky a běžné schůzky označené "volno" (celodenní bývají "volno" skoro vždy, ty zůstanou)
+            if p.MeetingStatus in (5, 7) or (p.BusyStatus == 0 and not celodenni):
                 continue
             soukroma = p.Sensitivity == 2 and N["skryvat_soukrome_schuzky"]  # 2 = soukromé
             schuzky.append({"od": zacatek.isoformat(), "do": konec.isoformat(), "celodenni": celodenni,
