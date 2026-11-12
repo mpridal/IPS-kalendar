@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Upravené použití projektu turing-smart-screen-python (https://github.com/mathoudebine/turing-smart-screen-python), 2026.
+#
 # Hodiny pro Turing Smart Screen 3.5" (revize A):
 # datum, čas, svátek, nejbližší schůzky z Outlooku, počasí z Open-Meteo a jmeniny ze svatkyapi.cz.
 # Nastavení (město, jas, noční režim, průhlednost panelu…) je v souboru nastaveni.json vedle tohoto skriptu;

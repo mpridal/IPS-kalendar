@@ -1,3 +1,20 @@
+# IPS-kalendář – hodiny, svátek, kalendář a počasí na malém USB displeji
+
+Tento repozitář vychází z projektu [turing-smart-screen-python](https://github.com/mathoudebine/turing-smart-screen-python)
+od Matthieu Houdebine a dalších autorů (licence GPL-3.0) a **přidává vlastní program `hodiny.py`** pro displej
+Turing Smart Screen 3.5" (revize A) na Windows:
+
+- datum česky, velký čas, kdo má svátek (svatkyapi.cz) a státní svátek,
+- nejbližší schůzky z klasického Outlooku (soukromé bez názvu, celodenní události),
+- počasí a předpověď na 3 dny z [Open-Meteo](https://open-meteo.com/),
+- pozadí podle aktuální tapety Windows, noční režim, reakce na odpojení displeje a uspání počítače.
+
+Přidané soubory: `hodiny.py`, `nastaveni.json`, `NAVOD.md` (návod k použití), `Spustit displej.cmd`,
+`Zastavit displej.cmd`, `Otevrit nastaveni.cmd`. Změny od původního projektu jsou z října a listopadu 2026.
+Původní knihovna displeje (`library/`) zůstala beze změn. Původní README následuje níže.
+
+---
+
 # ![Icon](https://raw.githubusercontent.com/mathoudebine/turing-smart-screen-python/main/res/icons/monitor-icon-17865/24.png) turing-smart-screen-python
 
 > [!WARNING]
